@@ -333,6 +333,38 @@ class Board:
             return region, WHITE
         return region, EMPTY
 
+    # -------------------------------------------------------------- eye check
+
+    def is_eye_for(self, color: int, point: int) -> bool:
+        """Heuristic eye-like check used by simple agents to avoid filling their
+        own eyes. A point is considered an eye for `color` when all orthogonal
+        neighbors are `color` (or off-board) and at most one diagonal neighbor
+        is not `color` (zero on edges and corners).
+
+        This is a heuristic — not a strict eye definition — but it is sufficient
+        to keep random self-play terminating at sensible game lengths.
+        """
+        if self._cells[point] != EMPTY:
+            return False
+        is_edge = False
+        for n in self._neighbors(point):
+            v = self._cells[n]
+            if v == OFFBOARD:
+                is_edge = True
+            elif v != color:
+                return False
+        s = self._stride
+        diagonals = (point - s - 1, point - s + 1, point + s - 1, point + s + 1)
+        bad = 0
+        for d in diagonals:
+            v = self._cells[d]
+            if v == OFFBOARD:
+                continue
+            if v != color:
+                bad += 1
+        threshold = 0 if is_edge else 1
+        return bad <= threshold
+
     # ----------------------------------------------------------------- copy
 
     def copy(self) -> Board:
