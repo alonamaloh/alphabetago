@@ -29,10 +29,14 @@ def main() -> None:
         return
 
     gens = [int(r["gen"]) for r in rows]
-    winrates = [float(r["eval_new_winrate"]) for r in rows]
-    margins = [float(r["eval_score_margin"]) for r in rows]
-    val_top1 = [float(r["val_top1"]) for r in rows]
-    val_own = [float(r["val_own"]) for r in rows]
+
+    def _opt_floats(key: str) -> list[float]:
+        return [float(r[key]) for r in rows if r.get(key)]
+
+    winrates = _opt_floats("eval_new_winrate")
+    margins = _opt_floats("eval_score_margin")
+    val_top1 = _opt_floats("val_top1")
+    val_own = _opt_floats("val_own")
 
     print(f"{len(rows)} generations logged.")
     print(

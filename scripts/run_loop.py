@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import csv
 import time
+from collections import deque
 from pathlib import Path
 
 import torch
@@ -26,6 +27,7 @@ import torch
 from alphabetago.board import BLACK, WHITE
 from alphabetago.nn import PolicyOwnershipNet
 from alphabetago.selfplay import (
+    load_games,
     play_match_game,
     play_search_games_serial,
     save_games,
@@ -97,6 +99,10 @@ def main() -> None:
     parser.add_argument("--search-batch", type=int, default=32)
     parser.add_argument("--temperature-moves", type=int, default=20)
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument(
+        "--k", type=int, default=1,
+        help="Replay-buffer window: train on the union of the last K gens' games."
+    )
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -106,6 +112,7 @@ def main() -> None:
 
     fieldnames = [
         "gen", "wall_sec",
+        "buffer_first", "buffer_last", "buffer_positions",
         "sp_avg_moves", "sp_b_wins", "sp_w_wins", "sp_jigos",
         "tr_pol", "tr_own", "tr_top1",
         "val_pol", "val_own", "val_top1",
@@ -121,9 +128,11 @@ def main() -> None:
         f"Generations: {args.n_gens}, games/gen: {args.games_per_gen}, "
         f"eval games: {args.eval_games}"
     )
+    print(f"Replay buffer K: {args.k}")
     print(f"Search per move: {args.search_iters} iters x {args.search_batch} leaves")
     print(f"Device: {device}", flush=True)
 
+    games_buffer: deque[list] = deque(maxlen=args.k)
     prev_ckpt = args.init_ckpt
     for gen in range(1, args.n_gens + 1):
         gen_start = time.time()
@@ -134,6 +143,8 @@ def main() -> None:
 
         if ckpt_path.exists():
             print(f"[gen {gen}] checkpoint exists, skipping (resume).", flush=True)
+            if games_path.exists():
+                games_buffer.append(load_games(games_path))
             prev_ckpt = ckpt_path
             continue
 
@@ -165,10 +176,18 @@ def main() -> None:
             flush=True,
         )
 
+        games_buffer.append(games)
+        buffer_games: list = []
+        for batch in games_buffer:
+            buffer_games.extend(batch)
+        buffer_first = max(1, gen - len(games_buffer) + 1)
+        buffer_last = gen
+        buffer_positions = sum(len(g.moves) for g in buffer_games)
+
         new_model = load_model(prev_ckpt, device)
         t0 = time.time()
         tr, va = fine_tune(
-            new_model, games, device,
+            new_model, buffer_games, device,
             epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr,
@@ -178,7 +197,8 @@ def main() -> None:
         train_t = time.time() - t0
         save_model(new_model, ckpt_path)
         print(
-            f"  train {train_t:.1f}s  tr_pol={tr['policy_loss']:.3f} "
+            f"  train {train_t:.1f}s  buffer=gen{buffer_first:03d}-gen{buffer_last:03d} "
+            f"({buffer_positions} pos)  tr_pol={tr['policy_loss']:.3f} "
             f"val_pol={va['policy_loss']:.3f} val_top1={va['top1']:.3f} "
             f"val_own={va['own_mse']:.3f}",
             flush=True,
@@ -210,6 +230,9 @@ def main() -> None:
             csv.DictWriter(f, fieldnames=fieldnames).writerow({
                 "gen": gen,
                 "wall_sec": f"{wall:.1f}",
+                "buffer_first": buffer_first,
+                "buffer_last": buffer_last,
+                "buffer_positions": buffer_positions,
                 "sp_avg_moves": f"{sp_avg_moves:.1f}",
                 "sp_b_wins": sp_b_wins,
                 "sp_w_wins": sp_w_wins,
