@@ -117,20 +117,27 @@ def play_search_game(
     leaves_per_batch: int = 64,
     seed: int | None = None,
     max_moves: int = 2000,
-    temperature_moves: int = 30,
+    temperature_moves: int = 20,
     temperature: float = 1.0,
 ) -> GameRecord:
     """Self-play a single game where each move is chosen by NN-guided search.
 
-    Move selection samples from the search visit distribution with the given
-    `temperature` for the first `temperature_moves` plies, then plays greedily
-    (argmax of visits). The visit distribution is also stored as the policy
-    target on the GameRecord for later training.
+    At every position:
+      - Run the search to populate the tree.
+      - Compute the alpha-beta best non-eye move at the root; this is recorded
+        as a one-hot policy target (the search's recommendation).
+      - For move selection, sample from the (eye-filtered) visit distribution
+        with `temperature` for the first `temperature_moves` plies, and
+        greedily play the alpha-beta best after that.
+
+    Eye-avoidance mirrors what `random_move` does, otherwise search-driven
+    games never pass and run forever.
     """
-    # Imports here to keep this module's top-level imports light.
     import numpy as np
 
     from alphabetago.search import (
+        best_non_eye_move,
+        filter_visits_no_eyes,
         sample_from_visit_policy,
         search,
         search_visit_policy,
@@ -147,15 +154,24 @@ def play_search_game(
             n_iterations=n_iterations,
             leaves_per_batch=leaves_per_batch,
         )
-        visits = search_visit_policy(root)
-        if not visits:
-            move = PASS
+        side = board.to_play
+        target_move, _ = best_non_eye_move(root, side)
+        if target_move is None:
+            target_move = PASS
+
+        if len(moves) < temperature_moves:
+            visits = search_visit_policy(root)
+            if visits:
+                visits = filter_visits_no_eyes(visits, board, side)
+                played = sample_from_visit_policy(visits, temperature, rng)
+            else:
+                played = PASS
         else:
-            t = temperature if len(moves) < temperature_moves else 0.0
-            move = sample_from_visit_policy(visits, t, rng)
-        visit_policies.append(visits)
-        board.play(move)
-        moves.append(move)
+            played = target_move
+
+        visit_policies.append({target_move: 1.0})
+        board.play(played)
+        moves.append(played)
 
     return GameRecord(
         size=size,

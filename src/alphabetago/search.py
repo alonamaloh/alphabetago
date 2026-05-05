@@ -272,3 +272,56 @@ def sample_from_visit_policy(
         return moves[int(rng.integers(len(moves)))]
     probs = counts / s
     return moves[int(rng.choice(len(moves), p=probs))]
+
+
+def best_non_eye_move(
+    root: Node, eye_color: int
+) -> tuple[int | None, float]:
+    """Among root children, pick the one with the highest negamax value while
+    skipping children that fill an own eye for `eye_color`. Returns
+    `(best_move, value)`; falls back to (PASS, 0.0) if every non-PASS root
+    move would fill an own eye.
+
+    Eye-filtering at the root level prevents the search-driven self-play
+    player from filling its own territory forever — the same heuristic the
+    random player uses, applied at move selection rather than during the
+    search itself.
+    """
+    if root.is_terminal:
+        return None, root.terminal_score
+    if not root.expanded or not root.children:
+        return None, 0.0
+    best_v = -math.inf
+    best_m: int | None = None
+    for move, child in root.children.items():
+        if move != PASS and root.board.is_eye_for(eye_color, move):
+            continue
+        if child.is_terminal:
+            v = -child.terminal_score
+        elif not child.expanded:
+            v = 0.0
+        else:
+            v_child, _ = alpha_beta(child, -math.inf, math.inf)
+            v = -v_child
+        if v > best_v:
+            best_v = v
+            best_m = move
+    if best_m is None:
+        return PASS, 0.0
+    return best_m, best_v
+
+
+def filter_visits_no_eyes(
+    visits: dict[int, float], board: Board, eye_color: int
+) -> dict[int, float]:
+    """Drop entries that would fill an own eye and renormalize."""
+    filtered = {
+        m: v for m, v in visits.items()
+        if m == PASS or not board.is_eye_for(eye_color, m)
+    }
+    if not filtered:
+        return {PASS: 1.0}
+    s = sum(filtered.values())
+    if s <= 0:
+        return {PASS: 1.0}
+    return {m: v / s for m, v in filtered.items()}
