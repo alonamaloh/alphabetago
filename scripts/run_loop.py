@@ -257,6 +257,8 @@ def main() -> None:
                 new_model, prev_model, args.eval_games, device, args,
                 seed_offset=gen * 1_000_000,
             )
+            del prev_model, new_model
+            torch.cuda.empty_cache()
         eval_t = time.time() - t0
         decisive = match["a_wins"] + match["b_wins"]
         winrate = match["a_wins"] / decisive if decisive else 0.5
@@ -292,8 +294,6 @@ def main() -> None:
                 "eval_score_margin": f"{match['a_score_avg']:.2f}",
             })
 
-        del prev_model, new_model
-        torch.cuda.empty_cache()
         prev_ckpt = ckpt_path
         print(f"[gen {gen}] DONE in {wall:.0f}s ({wall / 60:.1f} min)", flush=True)
 
