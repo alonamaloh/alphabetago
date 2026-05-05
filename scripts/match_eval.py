@@ -19,7 +19,7 @@ import torch
 
 from alphabetago.board import BLACK, WHITE
 from alphabetago.nn import PolicyOwnershipNet
-from alphabetago.selfplay import play_match_game
+from alphabetago.selfplay import play_match_game, play_match_games_multiproc
 
 
 def load_model(ckpt_path: Path, device: torch.device) -> PolicyOwnershipNet:
@@ -46,14 +46,58 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--temperature-moves", type=int, default=20)
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Match: A={args.a} vs B={args.b}")
+    print(f"Device: {device}, {args.n} games, workers={args.workers}")
+
+    if args.workers > 1:
+        # Probe A for board size, then hand off to multiproc.
+        probe = load_model(args.a, device)
+        size = probe.board_size
+        del probe
+        torch.cuda.empty_cache()
+        t0 = time.time()
+        match = play_match_games_multiproc(
+            n_games=args.n,
+            n_workers=args.workers,
+            ckpt_a=args.a,
+            ckpt_b=args.b,
+            size=size,
+            n_iterations=args.iterations,
+            leaves_per_batch=args.batch,
+            base_seed=args.seed,
+            temperature_moves=args.temperature_moves,
+            temperature=args.temperature,
+        )
+        dt = time.time() - t0
+        a_total = match["a_wins"]
+        b_total = match["b_wins"]
+        jigos = match["jigos"]
+        decisive = a_total + b_total
+        print(f"\nFinal ({dt:.0f}s):")
+        print(f"  A wins: {a_total}")
+        print(f"  B wins: {b_total}")
+        print(f"  Jigos:  {jigos}")
+        if decisive > 0:
+            a_winrate = a_total / decisive
+            n = decisive
+            z = 1.96
+            denom = 1 + z * z / n
+            center = (a_winrate + z * z / (2 * n)) / denom
+            margin = z * (a_winrate * (1 - a_winrate) / n + z * z / (4 * n * n)) ** 0.5 / denom
+            lo, hi = max(0.0, center - margin), min(1.0, center + margin)
+            print(
+                f"  A win rate (decisive only): {a_winrate * 100:.1f}%  "
+                f"[95% CI {lo * 100:.1f}–{hi * 100:.1f}%]"
+            )
+        print(f"  Mean score (A perspective): {match['a_score_avg']:+.2f}")
+        return
+
     model_a = load_model(args.a, device)
     model_b = load_model(args.b, device)
-
-    print(f"Match: A={args.a} vs B={args.b}")
-    print(f"Device: {device}, {args.n} games")
     print(
         f"Search per move: {args.iterations} iters x {args.batch} leaves "
         f"({args.iterations * args.batch} NN evals)"

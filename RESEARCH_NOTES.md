@@ -157,7 +157,8 @@ All in `runs/keep/` (gitignored — these are local artifacts, not source):
 | `loop_gen001.pt` | After 1 cycle of search-loop fine-tuning from gen 0. |
 | `loop_gen005.pt` | Around when the per-cycle improvement saturated. |
 | `loop_gen020.pt` | Mid-plateau. |
-| `loop_gen041.pt` | Last logged generation; representative of the plateau. |
+| `loop_gen041.pt` | Last logged generation of the K=1 baseline; representative of the plateau. |
+| `loop_k10_gen030.pt` | After 30 cycles with K=10 replay buffer. **Currently the strongest model.** |
 
 `runs/random9x9_ln/model.pt` is the same model as `gen0_random.pt`.
 
@@ -166,6 +167,36 @@ copies are pinned references. Likewise, the **per-generation game data is
 preserved** in `data/loop/gen001.pkl … data/loop/gen042.pkl` so the next
 recipe can warm-start from those games (replay buffer, etc.) without
 regenerating them.
+
+## Update — K=10 replay buffer + multi-process pipeline
+
+After the K=1 plateau and the offline K=10 ablation (suggestive but not
+significant), we ran a fresh **30-generation closed loop with K=10**
+starting from `gen0_random.pt`, with **multi-process self-play and
+match-eval** (16 workers each). Per-gen wall time fell from ~9 min to
+**~85 s**; the full 30-gen run finished in ~36 minutes.
+
+**Per-gen-vs-prev-gen winrate looks just as plateaued as K=1**:
+`last_5_mean(winrate) = 0.51`, range 0.12 – 0.82 over 29 logged gens.
+Plot: `notes/loop_k10_30gen_curves.png`. So measured purely by "did this
+gen beat last gen", the buffer doesn't seem to help.
+
+**But absolute-strength matchups tell a different story:**
+
+| Match (100 games, 4 iters x 32 leaves) | Decisive winrate | Score margin |
+|---|---:|---:|
+| `loop_k10_gen030` vs `gen0_random`       | **90.8%** [83.5–95.1%] | +49.0 |
+| `loop_k10_gen030` vs `loop_gen041` (K=1 plateau) | **66.3%** [56.5–74.9%] | +10.4 |
+
+So K=10 is in fact compounding small per-gen improvements — they're just
+small enough that a 50-game gen-vs-prev-gen match can't reliably detect
+them, and the noise dominates the curve. **The replay buffer works; the
+"plateau" we saw in the K=1 curve was largely a measurement-noise
+artifact at 50 games per gen.**
+
+Lesson: for future runs, evaluate against a **fixed external baseline**
+(e.g. `gen0_random.pt`) every K generations, not only against the
+immediate predecessor. The fixed-baseline curve has much higher SNR.
 
 ## What to try next, in roughly descending leverage
 
