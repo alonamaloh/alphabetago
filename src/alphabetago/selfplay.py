@@ -450,6 +450,131 @@ def play_search_games_multiproc(
     return games
 
 
+def _match_worker(packed):
+    """Top-level worker for multi-process match play. Loads both models from
+    their checkpoints in a fresh CUDA context, plays its share of games, and
+    returns (a_wins, b_wins, jigos, a_score_total, n_games_played)."""
+    import torch as _torch
+
+    from alphabetago.training import load_model as _load_model
+
+    (
+        ckpt_a, ckpt_b, n_local, size, n_iters, batch,
+        seed_offset, max_moves, temp_moves, temp, a_is_black_first,
+    ) = packed
+    device = _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
+    model_a = _load_model(Path(ckpt_a), device)
+    model_b = _load_model(Path(ckpt_b), device)
+
+    a_b = a_w = b_b = b_w = jigos = 0
+    a_score_total = 0.0
+    for i in range(n_local):
+        a_is_black = a_is_black_first if i % 2 == 0 else not a_is_black_first
+        if a_is_black:
+            black, white = model_a, model_b
+        else:
+            black, white = model_b, model_a
+        rec = play_match_game(
+            model_black=black,
+            model_white=white,
+            device=device,
+            size=size,
+            n_iterations=n_iters,
+            leaves_per_batch=batch,
+            seed=seed_offset + i,
+            max_moves=max_moves,
+            temperature_moves=temp_moves,
+            temperature=temp,
+        )
+        a_score_total += rec.final_score if a_is_black else -rec.final_score
+        if rec.winner == BLACK:
+            if a_is_black:
+                a_b += 1
+            else:
+                b_b += 1
+        elif rec.winner == WHITE:
+            if a_is_black:
+                b_w += 1
+            else:
+                a_w += 1
+        else:
+            jigos += 1
+    return (a_b, a_w, b_b, b_w, jigos, a_score_total, n_local)
+
+
+def play_match_games_multiproc(
+    n_games: int,
+    n_workers: int,
+    ckpt_a,
+    ckpt_b,
+    size: int = 9,
+    n_iterations: int = 4,
+    leaves_per_batch: int = 32,
+    base_seed: int = 0,
+    max_moves: int = 2000,
+    temperature_moves: int = 20,
+    temperature: float = 1.0,
+) -> dict[str, float]:
+    """Run an `n_games`-game match between checkpoints `ckpt_a` and `ckpt_b`
+    across `n_workers` processes. Sides alternate within each worker so the
+    first-move advantage is split. Returns the same dict shape as the
+    in-process match runner: a_wins, b_wins, jigos, a_score_avg.
+    """
+    n_workers = max(1, min(n_workers, n_games))
+    per = n_games // n_workers
+    leftover = n_games - per * n_workers
+    chunks = [per + (1 if i < leftover else 0) for i in range(n_workers)]
+
+    args_list = []
+    seed = base_seed
+    games_done = 0
+    for n_local in chunks:
+        if n_local == 0:
+            continue
+        # The very first game in `match_eval`'s convention has A as black
+        # (since `i % 2 == 0`). Each worker continues that alternation
+        # consistently using its own absolute game index.
+        a_is_black_first = (games_done % 2 == 0)
+        args_list.append((
+            str(ckpt_a),
+            str(ckpt_b),
+            n_local,
+            size,
+            n_iterations,
+            leaves_per_batch,
+            seed,
+            max_moves,
+            temperature_moves,
+            temperature,
+            a_is_black_first,
+        ))
+        seed += n_local
+        games_done += n_local
+
+    ctx = mp.get_context("spawn")
+    n_active = len(args_list)
+    with ctx.Pool(processes=n_active) as pool:
+        results = pool.map(_match_worker, args_list)
+
+    a_b = a_w = b_b = b_w = jigos = 0
+    a_score_total = 0.0
+    n_total = 0
+    for (a_b_, a_w_, b_b_, b_w_, jigos_, score_, n_) in results:
+        a_b += a_b_
+        a_w += a_w_
+        b_b += b_b_
+        b_w += b_w_
+        jigos += jigos_
+        a_score_total += score_
+        n_total += n_
+    return {
+        "a_wins": a_b + a_w,
+        "b_wins": b_b + b_w,
+        "jigos": jigos,
+        "a_score_avg": a_score_total / max(1, n_total),
+    }
+
+
 def play_search_games_serial(
     n_games: int,
     model,

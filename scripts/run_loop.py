@@ -29,6 +29,7 @@ from alphabetago.nn import PolicyOwnershipNet
 from alphabetago.selfplay import (
     load_games,
     play_match_game,
+    play_match_games_multiproc,
     play_search_games_multiproc,
     play_search_games_serial,
     save_games,
@@ -108,6 +109,10 @@ def main() -> None:
         "--sp-workers", type=int, default=1,
         help="Run self-play across this many processes (>=2 for multi-proc)."
     )
+    parser.add_argument(
+        "--eval-workers", type=int, default=1,
+        help="Run match-play across this many processes (>=2 for multi-proc)."
+    )
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -154,12 +159,11 @@ def main() -> None:
             continue
 
         print(f"\n[gen {gen}] self-play with {prev_ckpt}", flush=True)
+        # Probe the checkpoint once for board size; cheap.
+        probe = load_model(prev_ckpt, device)
+        board_size = probe.board_size
         t0 = time.time()
         if args.sp_workers > 1:
-            # Probe board size from the checkpoint without keeping the model
-            # resident on the main process.
-            probe = load_model(prev_ckpt, device)
-            board_size = probe.board_size
             del probe
             torch.cuda.empty_cache()
             games = play_search_games_multiproc(
@@ -174,13 +178,12 @@ def main() -> None:
                 temperature=args.temperature,
             )
         else:
-            prev_model = load_model(prev_ckpt, device)
-            prev_model.eval()
+            probe.eval()
             games = play_search_games_serial(
                 n_games=args.games_per_gen,
-                model=prev_model,
+                model=probe,
                 device=device,
-                size=prev_model.board_size,
+                size=board_size,
                 n_iterations=args.search_iters,
                 leaves_per_batch=args.search_batch,
                 base_seed=gen * 10000,
@@ -188,7 +191,7 @@ def main() -> None:
                 temperature=args.temperature,
                 progress_every=0,
             )
-            del prev_model
+            del probe
             torch.cuda.empty_cache()
         sp_t = time.time() - t0
         save_games(games, games_path)
@@ -230,14 +233,30 @@ def main() -> None:
             flush=True,
         )
 
-        prev_model = load_model(prev_ckpt, device)
-        prev_model.eval()
-        new_model.eval()
         t0 = time.time()
-        match = run_match(
-            new_model, prev_model, args.eval_games, device, args,
-            seed_offset=gen * 1_000_000,
-        )
+        if args.eval_workers > 1:
+            del new_model
+            torch.cuda.empty_cache()
+            match = play_match_games_multiproc(
+                n_games=args.eval_games,
+                n_workers=args.eval_workers,
+                ckpt_a=ckpt_path,
+                ckpt_b=prev_ckpt,
+                size=board_size,
+                n_iterations=args.search_iters,
+                leaves_per_batch=args.search_batch,
+                base_seed=gen * 1_000_000,
+                temperature_moves=args.temperature_moves,
+                temperature=args.temperature,
+            )
+        else:
+            prev_model = load_model(prev_ckpt, device)
+            prev_model.eval()
+            new_model.eval()
+            match = run_match(
+                new_model, prev_model, args.eval_games, device, args,
+                seed_offset=gen * 1_000_000,
+            )
         eval_t = time.time() - t0
         decisive = match["a_wins"] + match["b_wins"]
         winrate = match["a_wins"] / decisive if decisive else 0.5
