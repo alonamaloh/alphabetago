@@ -182,6 +182,70 @@ def play_search_game(
     )
 
 
+def play_match_game(
+    model_black,
+    model_white,
+    device,
+    size: int = 9,
+    n_iterations: int = 4,
+    leaves_per_batch: int = 32,
+    seed: int | None = None,
+    max_moves: int = 2000,
+    temperature_moves: int = 20,
+    temperature: float = 1.0,
+) -> GameRecord:
+    """Play one game between two models. `model_black` plays Black,
+    `model_white` plays White. Move selection mirrors `play_search_game`
+    (eye-avoidance, sample-from-visits with temperature in the opening,
+    greedy on the alpha-beta best move afterwards).
+    """
+    import numpy as np
+
+    from alphabetago.search import (
+        best_non_eye_move,
+        filter_visits_no_eyes,
+        sample_from_visit_policy,
+        search,
+        search_visit_policy,
+    )
+
+    rng = np.random.default_rng(seed)
+    board = Board(size=size)
+    moves: list[int] = []
+
+    while not board.is_game_over and len(moves) < max_moves:
+        side = board.to_play
+        model = model_black if side == BLACK else model_white
+        root, _, _ = search(
+            board, model, device,
+            n_iterations=n_iterations,
+            leaves_per_batch=leaves_per_batch,
+        )
+        target_move, _ = best_non_eye_move(root, side)
+        if target_move is None:
+            target_move = PASS
+
+        if len(moves) < temperature_moves:
+            visits = search_visit_policy(root)
+            if visits:
+                visits = filter_visits_no_eyes(visits, board, side)
+                played = sample_from_visit_policy(visits, temperature, rng)
+            else:
+                played = PASS
+        else:
+            played = target_move
+
+        board.play(played)
+        moves.append(played)
+
+    return GameRecord(
+        size=size,
+        moves=moves,
+        final_score=board.tromp_taylor_score(),
+        final_ownership=board.ownership(),
+    )
+
+
 def play_search_games_serial(
     n_games: int,
     model,
