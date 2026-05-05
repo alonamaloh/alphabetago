@@ -148,6 +148,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, default=None,
                         help="CPU workers used for one-shot featurization.")
+    parser.add_argument("--init", type=Path, default=None,
+                        help="Optional checkpoint to initialize weights from.")
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -178,6 +180,10 @@ def main() -> None:
     model = PolicyOwnershipNet(
         board_size=args.size, channels=args.channels, n_blocks=args.blocks
     ).to(device)
+    if args.init is not None:
+        state = torch.load(args.init, map_location=device, weights_only=False)
+        model.load_state_dict(state["model_state"])
+        print(f"Initialized weights from {args.init}")
     print(f"Model parameters: {model.parameter_count():,}")
 
     optimizer = torch.optim.Adam(
