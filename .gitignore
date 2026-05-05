@@ -30,6 +30,7 @@ Thumbs.db
 # ML artifacts
 checkpoints/
 runs/
+runs_*.log
 logs/
 *.pt
 *.pth
