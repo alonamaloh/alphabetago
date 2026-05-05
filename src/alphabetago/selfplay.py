@@ -24,6 +24,11 @@ class GameRecord:
     moves: list[int]
     final_score: int
     final_ownership: dict[int, int]
+    # If the game was generated via search self-play, this is the per-move
+    # search visit distribution (one dict per move actually played). For
+    # random self-play this stays None; training falls back to a one-hot
+    # target on the played move.
+    search_policies: list[dict[int, float]] | None = None
 
     @property
     def n_moves(self) -> int:
@@ -102,6 +107,105 @@ def play_random_games_parallel(
     chunksize = max(1, n_games // (n_workers * 8))
     with mp.Pool(n_workers) as pool:
         return pool.map(_play_one, args_list, chunksize=chunksize)
+
+
+def play_search_game(
+    model,
+    device,
+    size: int = 9,
+    n_iterations: int = 4,
+    leaves_per_batch: int = 64,
+    seed: int | None = None,
+    max_moves: int = 2000,
+    temperature_moves: int = 30,
+    temperature: float = 1.0,
+) -> GameRecord:
+    """Self-play a single game where each move is chosen by NN-guided search.
+
+    Move selection samples from the search visit distribution with the given
+    `temperature` for the first `temperature_moves` plies, then plays greedily
+    (argmax of visits). The visit distribution is also stored as the policy
+    target on the GameRecord for later training.
+    """
+    # Imports here to keep this module's top-level imports light.
+    import numpy as np
+
+    from alphabetago.search import (
+        sample_from_visit_policy,
+        search,
+        search_visit_policy,
+    )
+
+    rng = np.random.default_rng(seed)
+    board = Board(size=size)
+    moves: list[int] = []
+    visit_policies: list[dict[int, float]] = []
+
+    while not board.is_game_over and len(moves) < max_moves:
+        root, _, _ = search(
+            board, model, device,
+            n_iterations=n_iterations,
+            leaves_per_batch=leaves_per_batch,
+        )
+        visits = search_visit_policy(root)
+        if not visits:
+            move = PASS
+        else:
+            t = temperature if len(moves) < temperature_moves else 0.0
+            move = sample_from_visit_policy(visits, t, rng)
+        visit_policies.append(visits)
+        board.play(move)
+        moves.append(move)
+
+    return GameRecord(
+        size=size,
+        moves=moves,
+        final_score=board.tromp_taylor_score(),
+        final_ownership=board.ownership(),
+        search_policies=visit_policies,
+    )
+
+
+def play_search_games_serial(
+    n_games: int,
+    model,
+    device,
+    size: int = 9,
+    n_iterations: int = 4,
+    leaves_per_batch: int = 64,
+    base_seed: int = 0,
+    max_moves: int = 2000,
+    temperature_moves: int = 30,
+    temperature: float = 1.0,
+    progress_every: int = 0,
+) -> list[GameRecord]:
+    """Generate `n_games` search self-play games sequentially (single GPU)."""
+    import time
+
+    games: list[GameRecord] = []
+    t0 = time.time()
+    for i in range(n_games):
+        rec = play_search_game(
+            model=model,
+            device=device,
+            size=size,
+            n_iterations=n_iterations,
+            leaves_per_batch=leaves_per_batch,
+            seed=base_seed + i,
+            max_moves=max_moves,
+            temperature_moves=temperature_moves,
+            temperature=temperature,
+        )
+        games.append(rec)
+        if progress_every and (i + 1) % progress_every == 0:
+            dt = time.time() - t0
+            avg = dt / (i + 1)
+            eta = avg * (n_games - i - 1)
+            print(
+                f"  [{i + 1}/{n_games}] {avg:.1f}s/game, ETA {eta / 60:.1f} min",
+                flush=True,
+            )
+    return games
 
 
 def save_games(games: list[GameRecord], path: str | Path) -> None:

@@ -71,11 +71,12 @@ def run_epoch(
     n_seen = 0
     for feats, policies, ownerships in loader:
         feats = feats.to(device, non_blocking=True).float()
-        policies = policies.to(device, non_blocking=True).long()
+        policies = policies.to(device, non_blocking=True).float()
         ownerships = ownerships.to(device, non_blocking=True).float()
         with torch.set_grad_enabled(is_train):
             policy_logits, own_pred = model(feats)
-            pol_loss = F.cross_entropy(policy_logits, policies)
+            log_probs = F.log_softmax(policy_logits, dim=1)
+            pol_loss = -(policies * log_probs).sum(dim=1).mean()
             own_loss = F.mse_loss(own_pred, ownerships)
             loss = pol_loss + own_weight * own_loss
             if is_train:
@@ -85,7 +86,7 @@ def run_epoch(
         bs = feats.size(0)
         total_pol += pol_loss.item() * bs
         total_own += own_loss.item() * bs
-        total_acc += (policy_logits.argmax(dim=1) == policies).sum().item()
+        total_acc += (policy_logits.argmax(dim=1) == policies.argmax(dim=1)).sum().item()
         n_seen += bs
     return {
         "policy_loss": total_pol / n_seen,

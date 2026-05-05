@@ -113,3 +113,50 @@ def test_search_on_terminal_board():
     assert root.is_terminal
     assert move is None
     assert value == root.terminal_score
+
+
+def test_search_visit_policy_normalized():
+    from alphabetago.search import search_visit_policy
+
+    b = Board(size=5)
+    model = _untrained_model(size=5)
+    root, _, _ = search(
+        b, model, torch.device("cpu"), n_iterations=2, leaves_per_batch=4
+    )
+    visits = search_visit_policy(root)
+    assert visits, "expected a non-empty visit policy after a search"
+    assert math.isclose(sum(visits.values()), 1.0, abs_tol=1e-9)
+    # Every key is a legal move from the root (a child of root).
+    for move in visits:
+        assert move in root.children
+
+
+def test_sample_from_visit_policy_greedy():
+    from alphabetago.search import sample_from_visit_policy
+
+    rng = np.random.default_rng(0)
+    visits = {1: 0.1, 2: 0.7, 3: 0.2}
+    assert sample_from_visit_policy(visits, temperature=0.0, rng=rng) == 2
+
+
+def test_play_search_game_records_visit_policies():
+    from alphabetago.selfplay import play_search_game
+
+    model = _untrained_model(size=5)
+    rec = play_search_game(
+        model=model,
+        device=torch.device("cpu"),
+        size=5,
+        n_iterations=2,
+        leaves_per_batch=4,
+        seed=0,
+        temperature_moves=4,
+        temperature=1.0,
+    )
+    assert rec.size == 5
+    assert rec.search_policies is not None
+    assert len(rec.search_policies) == len(rec.moves)
+    # Each recorded policy is a normalized (or empty, on a terminal) distribution.
+    for pol in rec.search_policies:
+        if pol:
+            assert math.isclose(sum(pol.values()), 1.0, abs_tol=1e-6)

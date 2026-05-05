@@ -24,14 +24,20 @@ from alphabetago.selfplay import GameRecord
 def _process_game(rec: GameRecord) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     n = rec.size
     n_pos = len(rec.moves)
+    pol_dim = n * n + 1  # board moves plus PASS
     feats = np.zeros((n_pos, N_PLANES, n, n), dtype=np.int8)
-    policies = np.zeros(n_pos, dtype=np.int32)
+    policies = np.zeros((n_pos, pol_dim), dtype=np.float32)
     ownerships = np.zeros((n_pos, n, n), dtype=np.int8)
     board = Board(size=n)
+    has_search = rec.search_policies is not None
     for i, move in enumerate(rec.moves):
         feats[i] = featurize(board).astype(np.int8)
-        policies[i] = policy_target(move, board)
         ownerships[i] = ownership_target(rec.final_ownership, board.to_play, board).astype(np.int8)
+        if has_search:
+            for m, p in rec.search_policies[i].items():
+                policies[i, policy_target(m, board)] = float(p)
+        else:
+            policies[i, policy_target(move, board)] = 1.0
         board.play(move)
     return feats, policies, ownerships
 
@@ -42,9 +48,13 @@ def featurize_games(
     """Featurize all positions across all games.
 
     Returns:
-        features: [total_positions, N_PLANES, size, size] int8
-        policies: [total_positions] int32
-        ownerships: [total_positions, size, size] int8
+        features:   [total_positions, N_PLANES, size, size]  int8
+        policies:   [total_positions, size*size + 1]         float32 distribution
+        ownerships: [total_positions, size, size]            int8
+
+    The policy target is a soft distribution. For random self-play games
+    (no recorded search policies) it is a one-hot on the played move; for
+    search self-play games it is the recorded visit distribution.
     """
     if n_workers is None:
         n_workers = mp.cpu_count()

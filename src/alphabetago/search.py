@@ -220,3 +220,55 @@ def count_nodes(root: Node) -> tuple[int, int]:
             expanded += 1
         stack.extend(node.children.values())
     return total, expanded
+
+
+def subtree_size(node: Node) -> int:
+    """Number of nodes in the subtree rooted at `node` (including `node`)."""
+    total = 1
+    stack = list(node.children.values())
+    while stack:
+        n = stack.pop()
+        total += 1
+        stack.extend(n.children.values())
+    return total
+
+
+def search_visit_policy(root: Node) -> dict[int, float]:
+    """Visit distribution over root children, normalized to sum to 1.
+
+    Each child's "visit count" is the size of its subtree. This is the
+    AlphaZero-style policy target — moves the search descended into more get
+    higher mass — though here the descent is policy-best-first rather than
+    UCB-driven, so the distribution still reflects the prior fairly heavily.
+    """
+    if not root.children:
+        return {}
+    visits = {move: subtree_size(child) for move, child in root.children.items()}
+    total = sum(visits.values())
+    if total == 0:
+        return {}
+    return {m: v / total for m, v in visits.items()}
+
+
+def sample_from_visit_policy(
+    visits: dict[int, float],
+    temperature: float,
+    rng: np.random.Generator,
+) -> int:
+    """Sample a move from `visits` with temperature.
+
+    `temperature == 0` is greedy (argmax). Higher temperatures spread mass
+    more uniformly. Falls back to PASS if `visits` is empty.
+    """
+    if not visits:
+        return PASS
+    moves = list(visits.keys())
+    counts = np.array([visits[m] for m in moves], dtype=np.float64)
+    if temperature <= 0:
+        return moves[int(counts.argmax())]
+    counts = counts ** (1.0 / temperature)
+    s = counts.sum()
+    if s <= 0:
+        return moves[int(rng.integers(len(moves)))]
+    probs = counts / s
+    return moves[int(rng.choice(len(moves), p=probs))]
