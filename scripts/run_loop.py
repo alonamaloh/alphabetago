@@ -113,6 +113,15 @@ def main() -> None:
         "--eval-workers", type=int, default=1,
         help="Run match-play across this many processes (>=2 for multi-proc)."
     )
+    parser.add_argument(
+        "--bootstrap-data-dir", type=Path, default=None,
+        help=(
+            "Optional directory of pre-existing genNNN.pkl files to seed the "
+            "replay buffer with. The last K of them are loaded into the buffer "
+            "before generation 1 starts, so the first new generation trains on "
+            "a full K-window worth of data instead of just its own ~10k positions."
+        ),
+    )
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -143,6 +152,16 @@ def main() -> None:
     print(f"Device: {device}", flush=True)
 
     games_buffer: deque[list] = deque(maxlen=args.k)
+    if args.bootstrap_data_dir is not None:
+        pkls = sorted(args.bootstrap_data_dir.glob("gen*.pkl"))
+        for pkl in pkls[-args.k:]:
+            games_buffer.append(load_games(pkl))
+        seeded_pos = sum(len(g.moves) for batch in games_buffer for g in batch)
+        print(
+            f"Pre-filled replay buffer with {len(games_buffer)} batch(es) "
+            f"({seeded_pos} positions) from {args.bootstrap_data_dir}",
+            flush=True,
+        )
     prev_ckpt = args.init_ckpt
     for gen in range(1, args.n_gens + 1):
         gen_start = time.time()
