@@ -72,37 +72,37 @@ def _ensure_child(parent: Node, move: int) -> Node:
 
 def collect_unexpanded_leaves(root: Node, max_leaves: int) -> list[Node]:
     """Walk the tree best-first by accumulated `-log2(prob)`, collecting at
-    most `max_leaves` distinct unexpanded non-terminal nodes."""
+    most `max_leaves` distinct unexpanded non-terminal nodes.
+
+    The heap holds *edges* (parent, move) rather than pre-built child nodes,
+    so a child Board is materialized only when its edge is actually popped.
+    """
     if root.is_terminal:
         return []
     if not root.expanded:
         return [root]
 
-    heap: list[tuple[float, int, Node]] = []
+    # Heap entry: (accumulated_cost, tiebreaker, parent, move).
+    heap: list[tuple[float, int, Node, int]] = []
     counter = 0
-    heapq.heappush(heap, (0.0, counter, root))
-    counter += 1
+    for move, prob in root.policy.items():
+        if prob > 0.0:
+            heapq.heappush(heap, (-math.log2(prob), counter, root, move))
+            counter += 1
 
     leaves: list[Node] = []
-    seen: set[int] = set()
     while heap and len(leaves) < max_leaves:
-        cost, _, node = heapq.heappop(heap)
-        nid = id(node)
-        if nid in seen:
+        cost, _, parent, move = heapq.heappop(heap)
+        child = _ensure_child(parent, move)
+        if child.is_terminal:
             continue
-        seen.add(nid)
-        if node.is_terminal:
+        if not child.expanded:
+            leaves.append(child)
             continue
-        if not node.expanded:
-            leaves.append(node)
-            continue
-        for move, prob in node.policy.items():
-            if prob <= 0.0:
-                continue
-            move_cost = -math.log2(prob)
-            child = _ensure_child(node, move)
-            heapq.heappush(heap, (cost + move_cost, counter, child))
-            counter += 1
+        for m, p in child.policy.items():
+            if p > 0.0:
+                heapq.heappush(heap, (cost - math.log2(p), counter, child, m))
+                counter += 1
     return leaves
 
 
