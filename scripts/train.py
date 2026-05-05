@@ -132,7 +132,10 @@ def sanity_check(model: PolicyOwnershipNet, device: torch.device, size: int) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--games", type=Path, required=True, help="Pickle of GameRecords.")
+    parser.add_argument(
+        "--games", type=Path, required=True, nargs="+",
+        help="One or more pickles of GameRecords (concatenated)."
+    )
     parser.add_argument(
         "--out", type=Path, required=True, help="Output dir for checkpoint and log."
     )
@@ -154,9 +157,11 @@ def main() -> None:
 
     args.out.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading games from {args.games}...")
-    games = load_games(args.games)
-    print(f"  {len(games)} games loaded.")
+    print(f"Loading games from {len(args.games)} file(s)...")
+    games = []
+    for path in args.games:
+        games.extend(load_games(path))
+    print(f"  {len(games)} games loaded total.")
 
     print("Featurizing positions (one-time, parallel)...")
     t0 = time.time()
