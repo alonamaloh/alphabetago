@@ -47,17 +47,16 @@ class Node:
     children: dict[int, Node] = field(default_factory=dict)
 
     @classmethod
-    def from_board(cls, board: Board) -> Node:
+    def from_board(cls, board: Board, take_ownership: bool = False) -> Node:
+        """Build a node for `board`. If `take_ownership` is True, the caller
+        guarantees nothing else will mutate `board`, so we skip the copy."""
         is_terminal = board.is_game_over
         terminal_score: float | None = None
         if is_terminal:
             tt = board.tromp_taylor_score()
             terminal_score = float(tt) if board.to_play == BLACK else float(-tt)
-        return cls(
-            board=board.copy(),
-            is_terminal=is_terminal,
-            terminal_score=terminal_score,
-        )
+        b = board if take_ownership else board.copy()
+        return cls(board=b, is_terminal=is_terminal, terminal_score=terminal_score)
 
 
 def _ensure_child(parent: Node, move: int) -> Node:
@@ -65,7 +64,9 @@ def _ensure_child(parent: Node, move: int) -> Node:
     if child is None:
         new_board = parent.board.copy()
         new_board.play(move)
-        child = Node.from_board(new_board)
+        # `new_board` is freshly cloned and not exposed to the caller, so
+        # `Node.from_board` can take ownership instead of cloning again.
+        child = Node.from_board(new_board, take_ownership=True)
         parent.children[move] = child
     return child
 

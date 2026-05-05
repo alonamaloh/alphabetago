@@ -29,6 +29,7 @@ from alphabetago.nn import PolicyOwnershipNet
 from alphabetago.selfplay import (
     load_games,
     play_match_game,
+    play_search_games_multiproc,
     play_search_games_serial,
     save_games,
 )
@@ -103,6 +104,10 @@ def main() -> None:
         "--k", type=int, default=1,
         help="Replay-buffer window: train on the union of the last K gens' games."
     )
+    parser.add_argument(
+        "--sp-workers", type=int, default=1,
+        help="Run self-play across this many processes (>=2 for multi-proc)."
+    )
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -149,21 +154,42 @@ def main() -> None:
             continue
 
         print(f"\n[gen {gen}] self-play with {prev_ckpt}", flush=True)
-        prev_model = load_model(prev_ckpt, device)
-        prev_model.eval()
         t0 = time.time()
-        games = play_search_games_serial(
-            n_games=args.games_per_gen,
-            model=prev_model,
-            device=device,
-            size=prev_model.board_size,
-            n_iterations=args.search_iters,
-            leaves_per_batch=args.search_batch,
-            base_seed=gen * 10000,
-            temperature_moves=args.temperature_moves,
-            temperature=args.temperature,
-            progress_every=0,
-        )
+        if args.sp_workers > 1:
+            # Probe board size from the checkpoint without keeping the model
+            # resident on the main process.
+            probe = load_model(prev_ckpt, device)
+            board_size = probe.board_size
+            del probe
+            torch.cuda.empty_cache()
+            games = play_search_games_multiproc(
+                n_games=args.games_per_gen,
+                n_workers=args.sp_workers,
+                ckpt_path=prev_ckpt,
+                size=board_size,
+                n_iterations=args.search_iters,
+                leaves_per_batch=args.search_batch,
+                base_seed=gen * 10000,
+                temperature_moves=args.temperature_moves,
+                temperature=args.temperature,
+            )
+        else:
+            prev_model = load_model(prev_ckpt, device)
+            prev_model.eval()
+            games = play_search_games_serial(
+                n_games=args.games_per_gen,
+                model=prev_model,
+                device=device,
+                size=prev_model.board_size,
+                n_iterations=args.search_iters,
+                leaves_per_batch=args.search_batch,
+                base_seed=gen * 10000,
+                temperature_moves=args.temperature_moves,
+                temperature=args.temperature,
+                progress_every=0,
+            )
+            del prev_model
+            torch.cuda.empty_cache()
         sp_t = time.time() - t0
         save_games(games, games_path)
         sp_avg_moves = sum(g.n_moves for g in games) / len(games)
@@ -203,9 +229,6 @@ def main() -> None:
             f"val_own={va['own_mse']:.3f}",
             flush=True,
         )
-
-        del prev_model
-        torch.cuda.empty_cache()
 
         prev_model = load_model(prev_ckpt, device)
         prev_model.eval()

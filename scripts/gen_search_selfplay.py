@@ -21,7 +21,11 @@ from pathlib import Path
 import torch
 
 from alphabetago.nn import PolicyOwnershipNet
-from alphabetago.selfplay import play_search_games_serial, save_games
+from alphabetago.selfplay import (
+    play_search_games_multiproc,
+    play_search_games_serial,
+    save_games,
+)
 
 
 def load_model(ckpt_path: Path, device: torch.device) -> PolicyOwnershipNet:
@@ -50,36 +54,60 @@ def main() -> None:
     parser.add_argument("--temperature-moves", type=int, default=20)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="Run self-play across this many processes (>=2 for multi-proc)."
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_model(args.ckpt, device)
-    size = model.board_size
+    # Probe model config / size by loading once on the main process.
+    probe = load_model(args.ckpt, device)
+    size = probe.board_size
     print(
-        f"Model: size={size} channels={model.channels} blocks={model.n_blocks} "
-        f"params={model.parameter_count():,}"
+        f"Model: size={size} channels={probe.channels} blocks={probe.n_blocks} "
+        f"params={probe.parameter_count():,}"
     )
+    del probe
     print(f"Device: {device}")
     print(
         f"Search per move: {args.iterations} iterations x {args.batch} leaves "
         f"= {args.iterations * args.batch} NN evals (plus the root)."
     )
-    print(f"Temperature: {args.temperature} for first {args.temperature_moves} plies, then greedy.")
+    print(
+        f"Temperature: {args.temperature} for first {args.temperature_moves} plies, "
+        "then greedy."
+    )
+    print(f"Workers: {args.workers}")
     print(f"Generating {args.n} games...")
 
     t0 = time.time()
-    games = play_search_games_serial(
-        n_games=args.n,
-        model=model,
-        device=device,
-        size=size,
-        n_iterations=args.iterations,
-        leaves_per_batch=args.batch,
-        base_seed=args.seed,
-        temperature_moves=args.temperature_moves,
-        temperature=args.temperature,
-        progress_every=max(1, args.n // 20),
-    )
+    if args.workers > 1:
+        games = play_search_games_multiproc(
+            n_games=args.n,
+            n_workers=args.workers,
+            ckpt_path=args.ckpt,
+            size=size,
+            n_iterations=args.iterations,
+            leaves_per_batch=args.batch,
+            base_seed=args.seed,
+            temperature_moves=args.temperature_moves,
+            temperature=args.temperature,
+        )
+    else:
+        model = load_model(args.ckpt, device)
+        games = play_search_games_serial(
+            n_games=args.n,
+            model=model,
+            device=device,
+            size=size,
+            n_iterations=args.iterations,
+            leaves_per_batch=args.batch,
+            base_seed=args.seed,
+            temperature_moves=args.temperature_moves,
+            temperature=args.temperature,
+            progress_every=max(1, args.n // 20),
+        )
     t1 = time.time()
     print(f"Done in {t1 - t0:.1f}s ({(t1 - t0) / args.n:.1f} s/game).")
 
