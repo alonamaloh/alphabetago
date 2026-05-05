@@ -3,20 +3,79 @@
 A single fine-tuning step over a list of GameRecords: featurizes them all,
 splits into train/val, runs N epochs of soft-cross-entropy + ownership-MSE,
 returns the final-epoch metrics.
+
+Training samples are augmented with a random D4 board symmetry (one of 8
+rotations/reflections) per `__getitem__` call to prevent the network from
+memorizing position-specific spatial patterns within a game and overfitting.
+The transformation is applied consistently to features, policy target, and
+ownership target. Validation samples are NOT augmented so that val metrics
+remain a deterministic measure of generalization.
 """
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from alphabetago.dataset import featurize_games
 from alphabetago.nn import PolicyOwnershipNet
 from alphabetago.selfplay import GameRecord
+
+
+def _apply_d4(t: torch.Tensor, sym: int) -> torch.Tensor:
+    """Apply one of 8 D4 dihedral transformations to a tensor whose last two
+    dims are (H, W). `sym` ∈ [0, 7]: bit 0 = horizontal flip, bits 1-2 =
+    number of 90° CCW rotations."""
+    if sym & 1:
+        t = torch.flip(t, dims=[-1])
+    k = (sym >> 1) & 3
+    if k:
+        t = torch.rot90(t, k, dims=[-2, -1])
+    return t
+
+
+def apply_d4_sample(
+    features: torch.Tensor,
+    policy: torch.Tensor,
+    ownership: torch.Tensor,
+    sym: int,
+    board_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Apply the same D4 symmetry to a (features, policy, ownership) triple.
+
+    `features`: [C, H, W]. `policy`: [H*W + 1] (board moves + PASS).
+    `ownership`: [H, W]. PASS stays at index H*W (it's not a board point).
+    """
+    n = board_size
+    features_out = _apply_d4(features, sym)
+    policy_board = policy[: n * n].view(n, n)
+    policy_board = _apply_d4(policy_board, sym).contiguous().view(-1)
+    policy_out = torch.cat([policy_board, policy[n * n :]])
+    ownership_out = _apply_d4(ownership, sym)
+    return features_out, policy_out, ownership_out
+
+
+class D4Dataset(Dataset):
+    """Wrap a TensorDataset of (features, policy, ownership) triples and
+    apply a random D4 symmetry per item access. Length is preserved; each
+    epoch sees fresh random transformations."""
+
+    def __init__(self, base: TensorDataset, board_size: int):
+        self._base = base
+        self._size = board_size
+
+    def __len__(self) -> int:
+        return len(self._base)
+
+    def __getitem__(self, idx: int):
+        f, p, o = self._base[idx]
+        sym = random.randrange(8)
+        return apply_d4_sample(f, p, o, sym, self._size)
 
 
 def load_model(ckpt_path: Path, device: torch.device) -> PolicyOwnershipNet:
@@ -74,8 +133,10 @@ def fine_tune(
     feats_t = torch.from_numpy(feats)
     pol_t = torch.from_numpy(policies)
     own_t = torch.from_numpy(ownerships)
-    train_ds = TensorDataset(feats_t[n_val:], pol_t[n_val:], own_t[n_val:])
+    board_size = feats.shape[-1]
+    train_base = TensorDataset(feats_t[n_val:], pol_t[n_val:], own_t[n_val:])
     val_ds = TensorDataset(feats_t[:n_val], pol_t[:n_val], own_t[:n_val])
+    train_ds = D4Dataset(train_base, board_size)
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True, pin_memory=True
     )

@@ -25,6 +25,7 @@ from alphabetago.dataset import featurize_games
 from alphabetago.features import N_PLANES, featurize
 from alphabetago.nn import PolicyOwnershipNet
 from alphabetago.selfplay import load_games
+from alphabetago.training import D4Dataset
 
 
 def make_dataloaders(
@@ -45,7 +46,9 @@ def make_dataloaders(
     feats_t = torch.from_numpy(feats)
     pol_t = torch.from_numpy(policies)
     own_t = torch.from_numpy(ownerships)
-    train_ds = TensorDataset(feats_t[n_val:], pol_t[n_val:], own_t[n_val:])
+    board_size = feats.shape[-1]
+    train_base = TensorDataset(feats_t[n_val:], pol_t[n_val:], own_t[n_val:])
+    train_ds = D4Dataset(train_base, board_size)
     val_ds = TensorDataset(feats_t[:n_val], pol_t[:n_val], own_t[:n_val])
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True
