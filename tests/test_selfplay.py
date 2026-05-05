@@ -1,7 +1,13 @@
 import random
 
 from alphabetago.board import BLACK, EMPTY, PASS, WHITE, Board
-from alphabetago.selfplay import play_random_game, random_move
+from alphabetago.selfplay import (
+    load_games,
+    play_random_game,
+    play_random_games_parallel,
+    random_move,
+    save_games,
+)
 
 
 def test_eye_detection_corner():
@@ -82,3 +88,27 @@ def test_game_record_winner():
         assert rec.winner == WHITE
     else:
         assert rec.winner == EMPTY
+
+
+def test_parallel_matches_serial():
+    n = 8
+    base = 100
+    serial = [play_random_game(size=9, seed=base + i) for i in range(n)]
+    parallel = play_random_games_parallel(
+        n_games=n, size=9, base_seed=base, n_workers=4
+    )
+    for s, p in zip(serial, parallel, strict=True):
+        assert s.moves == p.moves
+        assert s.final_score == p.final_score
+
+
+def test_save_and_load_games(tmp_path):
+    games = [play_random_game(size=5, seed=i) for i in range(3)]
+    path = tmp_path / "games.pkl"
+    save_games(games, path)
+    loaded = load_games(path)
+    assert len(loaded) == 3
+    for original, restored in zip(games, loaded, strict=True):
+        assert original.moves == restored.moves
+        assert original.final_score == restored.final_score
+        assert original.final_ownership == restored.final_ownership

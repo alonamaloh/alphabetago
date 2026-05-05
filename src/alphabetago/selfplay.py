@@ -9,8 +9,11 @@ introduced; it is not a strong player.
 
 from __future__ import annotations
 
+import multiprocessing as mp
+import pickle
 import random
 from dataclasses import dataclass
+from pathlib import Path
 
 from alphabetago.board import BLACK, EMPTY, PASS, WHITE, Board
 
@@ -76,3 +79,41 @@ def play_random_game(
         final_score=board.tromp_taylor_score(),
         final_ownership=board.ownership(),
     )
+
+
+def _play_one(args: tuple[int, float, int, int]) -> GameRecord:
+    size, komi, seed, max_moves = args
+    return play_random_game(size=size, komi=komi, seed=seed, max_moves=max_moves)
+
+
+def play_random_games_parallel(
+    n_games: int,
+    size: int = 9,
+    komi: float = 7.0,
+    base_seed: int = 0,
+    max_moves: int = 2000,
+    n_workers: int | None = None,
+) -> list[GameRecord]:
+    """Generate `n_games` self-play games across a process pool.
+
+    Each game gets a distinct seed (`base_seed + i`) so the run is reproducible
+    given the same base seed and worker count.
+    """
+    if n_workers is None:
+        n_workers = mp.cpu_count()
+    n_workers = min(n_workers, n_games)
+    args_list = [(size, komi, base_seed + i, max_moves) for i in range(n_games)]
+    chunksize = max(1, n_games // (n_workers * 8))
+    with mp.Pool(n_workers) as pool:
+        return pool.map(_play_one, args_list, chunksize=chunksize)
+
+
+def save_games(games: list[GameRecord], path: str | Path) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump(games, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_games(path: str | Path) -> list[GameRecord]:
+    with open(path, "rb") as f:
+        return pickle.load(f)
