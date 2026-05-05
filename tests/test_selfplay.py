@@ -54,7 +54,7 @@ def test_score_consistent_with_ownership():
     rec = play_random_game(size=9, seed=42)
     n_b = sum(1 for v in rec.final_ownership.values() if v == BLACK)
     n_w = sum(1 for v in rec.final_ownership.values() if v == WHITE)
-    assert rec.final_score == n_b - n_w - rec.komi
+    assert rec.final_score == n_b - n_w
 
 
 def test_random_game_5x5():
@@ -63,7 +63,7 @@ def test_random_game_5x5():
     assert rec.moves[-2:] == [PASS, PASS]
     n_b = sum(1 for v in rec.final_ownership.values() if v == BLACK)
     n_w = sum(1 for v in rec.final_ownership.values() if v == WHITE)
-    assert rec.final_score == n_b - n_w - rec.komi
+    assert rec.final_score == n_b - n_w
 
 
 def test_different_seeds_differ():

@@ -21,16 +21,15 @@ def _play_seq(board, moves):
 
 
 def test_initial_state():
-    b = Board(size=9, komi=7.0)
+    b = Board(size=9)
     assert b.size == 9
-    assert b.komi == 7.0
     assert b.to_play == BLACK
     assert b.move_number == 0
     assert not b.is_game_over
-    assert b.ko_point is None
     for p in b.on_board_points():
         assert b.stone_at(p) == EMPTY
     assert len(b.legal_moves()) == 9 * 9 + 1
+    assert b.position_hash == 0
 
 
 def test_coord_roundtrip():
@@ -175,46 +174,45 @@ def test_ko():
         ],
     )
     assert b.to_play == WHITE
-    assert b.ko_point == b.point(1, 1)
+    # Positional superko forbids the immediate recapture.
     assert not b.is_legal(b.point(1, 1))
-    # White plays elsewhere; ko clears.
+    # After both sides play elsewhere, the position differs from the prior
+    # one and the ko square is legal again.
     b.play(b.point(7, 7))
-    assert b.ko_point is None
-    b.play(b.point(7, 8))  # B somewhere else
-    # White's turn again; ko square is now legal (and would re-capture).
+    b.play(b.point(7, 8))
     assert b.is_legal(b.point(1, 1))
 
 
 def test_tromp_taylor_empty_board():
-    b = Board(size=9, komi=7.0)
+    b = Board(size=9)
     b.play(PASS)
     b.play(PASS)
-    # No stones; the empty region touches no color → no territory for either side.
-    assert b.tromp_taylor_score() == -7.0
+    # No stones; the empty region touches no color → score = 0.
+    assert b.tromp_taylor_score() == 0
 
 
 def test_tromp_taylor_single_stone():
-    b = Board(size=5, komi=0.0)
+    b = Board(size=5)
     b.play(b.point(2, 2))
     b.play(PASS)
     b.play(PASS)
     assert b.is_game_over
     # 1 stone + 24 empty cells (all touching only B) = 25 black area.
-    assert b.tromp_taylor_score() == 25.0
+    assert b.tromp_taylor_score() == 25
 
 
 def test_tromp_taylor_two_colors_contested():
-    b = Board(size=5, komi=0.0)
+    b = Board(size=5)
     b.play(b.point(1, 2))  # B
     b.play(b.point(3, 2))  # W
     b.play(PASS)
     b.play(PASS)
-    # Empty region touches both colors → contested, no territory.
-    assert b.tromp_taylor_score() == 0.0
+    # Empty region touches both colors → contested, no territory. 1-1 = 0.
+    assert b.tromp_taylor_score() == 0
 
 
 def test_ownership_simple():
-    b = Board(size=5, komi=0.0)
+    b = Board(size=5)
     b.play(b.point(2, 2))
     b.play(PASS)
     b.play(PASS)

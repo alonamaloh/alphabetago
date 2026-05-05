@@ -11,6 +11,8 @@ on every move.
 
 from __future__ import annotations
 
+import random
+
 EMPTY: int = 0
 BLACK: int = 1
 WHITE: int = 2
@@ -27,6 +29,25 @@ class IllegalMoveError(ValueError):
     pass
 
 
+_ZOBRIST_CACHE: dict[int, tuple[list[int], list[int]]] = {}
+
+
+def _get_zobrist(stride: int) -> tuple[list[int], list[int]]:
+    """Return (black_table, white_table); each is a list of 64-bit hash values
+    indexed by 1-D mailbox point. Cached per stride so all boards of a given
+    size share the same tables (and therefore comparable hashes)."""
+    table = _ZOBRIST_CACHE.get(stride)
+    if table is None:
+        rng = random.Random(f"alphabetago-zobrist-{stride}")
+        nn = stride * stride
+        table = (
+            [rng.getrandbits(64) for _ in range(nn)],
+            [rng.getrandbits(64) for _ in range(nn)],
+        )
+        _ZOBRIST_CACHE[stride] = table
+    return table
+
+
 class Board:
     EMPTY = EMPTY
     BLACK = BLACK
@@ -34,12 +55,11 @@ class Board:
     OFFBOARD = OFFBOARD
     PASS = PASS
 
-    def __init__(self, size: int = 9, komi: float = 7.0):
+    def __init__(self, size: int = 9):
         if size < 2:
             raise ValueError(f"size must be >= 2 (got {size})")
         self._n = size
         self._stride = size + 2
-        self._komi = komi
         nn = self._stride * self._stride
         self._cells = bytearray([OFFBOARD] * nn)
         for r in range(size):
@@ -48,7 +68,9 @@ class Board:
         self._parent: list[int] = list(range(nn))
         self._chain_stones: list[int] = [0] * nn
         self._chain_liberties: list[set[int]] = [set() for _ in range(nn)]
-        self._ko_point: int | None = None
+        self._zobrist_black, self._zobrist_white = _get_zobrist(self._stride)
+        self._hash: int = 0
+        self._history: set[int] = {0}
         self._to_play: int = BLACK
         self._consecutive_passes: int = 0
         self._move_number: int = 0
@@ -60,10 +82,6 @@ class Board:
     @property
     def size(self) -> int:
         return self._n
-
-    @property
-    def komi(self) -> float:
-        return self._komi
 
     @property
     def to_play(self) -> int:
@@ -78,8 +96,8 @@ class Board:
         return self._consecutive_passes >= 2
 
     @property
-    def ko_point(self) -> int | None:
-        return self._ko_point
+    def position_hash(self) -> int:
+        return self._hash
 
     @property
     def last_move(self) -> int | None:
@@ -150,6 +168,51 @@ class Board:
 
     # --------------------------------------------------------------- legality
 
+    def _zobrist_for(self, color: int) -> list[int]:
+        return self._zobrist_black if color == BLACK else self._zobrist_white
+
+    def _stones_in_chain(self, seed: int) -> list[int]:
+        """Flood-fill the same-colored stones connected to `seed`."""
+        color = self._cells[seed]
+        visited: set[int] = set()
+        stack = [seed]
+        out: list[int] = []
+        while stack:
+            p = stack.pop()
+            if p in visited or self._cells[p] != color:
+                continue
+            visited.add(p)
+            out.append(p)
+            for n in self._neighbors(p):
+                if n not in visited:
+                    stack.append(n)
+        return out
+
+    def _tentative_hash_after_move(self, point: int) -> int:
+        """Hypothetical position hash if `to_play` plays at `point`. Includes
+        the effect of any captures the move would cause. Does not mutate state.
+
+        Assumes the move is otherwise legal at the suicide-rule level (the
+        caller has already verified it).
+        """
+        me = self._to_play
+        opp = opponent(me)
+        z_me = self._zobrist_for(me)
+        z_opp = self._zobrist_for(opp)
+        h = self._hash ^ z_me[point]
+        captured_roots: set[int] = set()
+        for n in self._neighbors(point):
+            if self._cells[n] != opp:
+                continue
+            root = self._find(n)
+            if root in captured_roots:
+                continue
+            if self._chain_liberties[root] == {point}:
+                captured_roots.add(root)
+                for s in self._stones_in_chain(n):
+                    h ^= z_opp[s]
+        return h
+
     def is_legal(self, point: int) -> bool:
         if self.is_game_over:
             return False
@@ -159,19 +222,27 @@ class Board:
             return False
         if self._cells[point] != EMPTY:
             return False
-        if self._ko_point is not None and point == self._ko_point:
-            return False
+        # Suicide check: at least one of (empty neighbor, friendly chain with
+        # spare liberty, opponent chain reduced to zero liberties) must hold.
         my_color = self._to_play
         opp = opponent(my_color)
+        not_suicide = False
         for n in self._neighbors(point):
             v = self._cells[n]
             if v == EMPTY:
-                return True
+                not_suicide = True
+                break
             if v == my_color and len(self._chain_liberties[self._find(n)]) > 1:
-                return True
+                not_suicide = True
+                break
             if v == opp and len(self._chain_liberties[self._find(n)]) == 1:
-                return True
-        return False
+                not_suicide = True
+                break
+        if not not_suicide:
+            return False
+        # Positional superko: the resulting board state must not match any
+        # previously seen one.
+        return self._tentative_hash_after_move(point) not in self._history
 
     def legal_moves(self, include_pass: bool = True) -> list[int]:
         moves = [p for p in self.on_board_points() if self.is_legal(p)]
@@ -187,7 +258,6 @@ class Board:
         self._move_number += 1
         if point == PASS:
             self._consecutive_passes += 1
-            self._ko_point = None
             self._last_move = None
             self._last_captured_count = 0
             self._to_play = opponent(self._to_play)
@@ -196,6 +266,8 @@ class Board:
         self._consecutive_passes = 0
         my_color = self._to_play
         opp = opponent(my_color)
+        z_me = self._zobrist_for(my_color)
+        z_opp = self._zobrist_for(opp)
 
         # Step 1: remove `point` as a liberty from neighboring chains; capture
         # any opponent chain reduced to zero liberties.
@@ -206,7 +278,7 @@ class Board:
                 root = self._find(n)
                 self._chain_liberties[root].discard(point)
                 if not self._chain_liberties[root]:
-                    captured_count += self._capture_chain(n)
+                    captured_count += self._capture_chain(n, z_opp)
             elif v == my_color:
                 self._chain_liberties[self._find(n)].discard(point)
 
@@ -217,46 +289,24 @@ class Board:
         self._chain_liberties[point] = {
             m for m in self._neighbors(point) if self._cells[m] == EMPTY
         }
+        self._hash ^= z_me[point]
 
         # Step 3: merge with adjacent friendly chains.
         for n in self._neighbors(point):
             if self._cells[n] == my_color:
                 self._union(point, n)
 
-        # Step 4: ko bookkeeping. A simple-ko situation arises when our move
-        # captured exactly one stone and our resulting chain has exactly one
-        # stone with exactly one liberty — that liberty is the ko point.
-        new_root = self._find(point)
-        if (
-            captured_count == 1
-            and self._chain_stones[new_root] == 1
-            and len(self._chain_liberties[new_root]) == 1
-        ):
-            (self._ko_point,) = self._chain_liberties[new_root]
-        else:
-            self._ko_point = None
-
         self._last_move = point
         self._last_captured_count = captured_count
         self._to_play = opp
+        self._history.add(self._hash)
 
-    def _capture_chain(self, seed: int) -> int:
-        color = self._cells[seed]
+    def _capture_chain(self, seed: int, zobrist_table: list[int]) -> int:
         root = self._find(seed)
-        stones: list[int] = []
-        visited: set[int] = set()
-        stack = [seed]
-        while stack:
-            p = stack.pop()
-            if p in visited or self._cells[p] != color:
-                continue
-            visited.add(p)
-            stones.append(p)
-            for n in self._neighbors(p):
-                if n not in visited:
-                    stack.append(n)
+        stones = self._stones_in_chain(seed)
         for s in stones:
             self._cells[s] = EMPTY
+            self._hash ^= zobrist_table[s]
         for s in stones:
             for m in self._neighbors(s):
                 if self._cells[m] in (BLACK, WHITE):
@@ -267,10 +317,10 @@ class Board:
 
     # --------------------------------------------------------------- scoring
 
-    def tromp_taylor_score(self) -> float:
-        """Area score from black's perspective (positive = black ahead)."""
+    def tromp_taylor_score(self) -> int:
+        """Area score from black's perspective (positive = black ahead). No komi."""
         black, white = self._area_counts()
-        return black - white - self._komi
+        return black - white
 
     def ownership(self) -> dict[int, int]:
         """Map each on-board point to BLACK, WHITE, or EMPTY (contested)."""
@@ -371,12 +421,14 @@ class Board:
         b = Board.__new__(Board)
         b._n = self._n
         b._stride = self._stride
-        b._komi = self._komi
         b._cells = bytearray(self._cells)
         b._parent = self._parent[:]
         b._chain_stones = self._chain_stones[:]
         b._chain_liberties = [s.copy() for s in self._chain_liberties]
-        b._ko_point = self._ko_point
+        b._zobrist_black = self._zobrist_black
+        b._zobrist_white = self._zobrist_white
+        b._hash = self._hash
+        b._history = self._history.copy()
         b._to_play = self._to_play
         b._consecutive_passes = self._consecutive_passes
         b._move_number = self._move_number

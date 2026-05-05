@@ -7,11 +7,11 @@ Plane layout (20 channels total):
    6..9       : opponent chain liberty count, one-hot bucketed at 1, 2, 3, >=4
   10..13      : own chain stone count, one-hot bucketed at 1, 2, 3, >=4
   14..17      : opponent chain stone count, one-hot bucketed at 1, 2, 3, >=4
-  18          : last-move location (zero plane on a pass)
+  18          : legality mask (1 where the side to play has a legal move)
   19          : all-ones constant
 
-The bucketed liberty / chain-size planes carry the chain stats per stone the
-user wants the network to see.
+The legality plane folds in ko and positional-superko prohibitions: a point is
+1 iff `Board.is_legal` returns True for it.
 """
 
 from __future__ import annotations
@@ -24,15 +24,14 @@ LIB_BUCKETS = 4
 SIZE_BUCKETS = 4
 N_PLANES = 2 + 2 * LIB_BUCKETS + 2 * SIZE_BUCKETS + 1 + 1
 
-# Plane index offsets.
 P_OWN_STONES = 0
 P_OPP_STONES = 1
 P_OWN_LIBS = 2
 P_OPP_LIBS = P_OWN_LIBS + LIB_BUCKETS
 P_OWN_SIZE = P_OPP_LIBS + LIB_BUCKETS
 P_OPP_SIZE = P_OWN_SIZE + SIZE_BUCKETS
-P_LAST_MOVE = P_OPP_SIZE + SIZE_BUCKETS
-P_ONES = P_LAST_MOVE + 1
+P_LEGALITY = P_OPP_SIZE + SIZE_BUCKETS
+P_ONES = P_LEGALITY + 1
 
 
 def featurize(board: Board) -> np.ndarray:
@@ -58,10 +57,9 @@ def featurize(board: Board) -> np.ndarray:
                 out[P_OPP_LIBS + lib_bucket, r, c] = 1.0
                 size_bucket = min(board.chain_size_at(point), SIZE_BUCKETS) - 1
                 out[P_OPP_SIZE + size_bucket, r, c] = 1.0
-
-    if board.last_move is not None:
-        r, c = board.coord(board.last_move)
-        out[P_LAST_MOVE, r, c] = 1.0
+            else:
+                if board.is_legal(point):
+                    out[P_LEGALITY, r, c] = 1.0
 
     out[P_ONES, :, :] = 1.0
     return out

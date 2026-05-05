@@ -21,9 +21,8 @@ from alphabetago.board import BLACK, EMPTY, PASS, WHITE, Board
 @dataclass
 class GameRecord:
     size: int
-    komi: float
     moves: list[int]
-    final_score: float
+    final_score: int
     final_ownership: dict[int, int]
 
     @property
@@ -60,13 +59,12 @@ def random_move(board: Board, rng: random.Random) -> int:
 
 def play_random_game(
     size: int = 9,
-    komi: float = 7.0,
     seed: int | None = None,
     max_moves: int = 2000,
 ) -> GameRecord:
     """Play one self-play game with both sides choosing moves at random."""
     rng = random.Random(seed)
-    board = Board(size=size, komi=komi)
+    board = Board(size=size)
     moves: list[int] = []
     while not board.is_game_over and len(moves) < max_moves:
         m = random_move(board, rng)
@@ -74,22 +72,20 @@ def play_random_game(
         moves.append(m)
     return GameRecord(
         size=size,
-        komi=komi,
         moves=moves,
         final_score=board.tromp_taylor_score(),
         final_ownership=board.ownership(),
     )
 
 
-def _play_one(args: tuple[int, float, int, int]) -> GameRecord:
-    size, komi, seed, max_moves = args
-    return play_random_game(size=size, komi=komi, seed=seed, max_moves=max_moves)
+def _play_one(args: tuple[int, int, int]) -> GameRecord:
+    size, seed, max_moves = args
+    return play_random_game(size=size, seed=seed, max_moves=max_moves)
 
 
 def play_random_games_parallel(
     n_games: int,
     size: int = 9,
-    komi: float = 7.0,
     base_seed: int = 0,
     max_moves: int = 2000,
     n_workers: int | None = None,
@@ -102,7 +98,7 @@ def play_random_games_parallel(
     if n_workers is None:
         n_workers = mp.cpu_count()
     n_workers = min(n_workers, n_games)
-    args_list = [(size, komi, base_seed + i, max_moves) for i in range(n_games)]
+    args_list = [(size, base_seed + i, max_moves) for i in range(n_games)]
     chunksize = max(1, n_games // (n_workers * 8))
     with mp.Pool(n_workers) as pool:
         return pool.map(_play_one, args_list, chunksize=chunksize)

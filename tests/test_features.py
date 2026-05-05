@@ -4,7 +4,7 @@ from alphabetago.board import BLACK, EMPTY, PASS, WHITE, Board
 from alphabetago.features import (
     LIB_BUCKETS,
     N_PLANES,
-    P_LAST_MOVE,
+    P_LEGALITY,
     P_ONES,
     P_OPP_LIBS,
     P_OPP_SIZE,
@@ -26,10 +26,10 @@ def test_empty_board_features():
     f = featurize(b)
     assert f.shape == (N_PLANES, 9, 9)
     assert f.dtype == np.float32
-    # No stones, no last move; only the constant ones plane is non-zero.
     assert f[P_OWN_STONES].sum() == 0
     assert f[P_OPP_STONES].sum() == 0
-    assert f[P_LAST_MOVE].sum() == 0
+    # All 81 empty points are legal on an empty board.
+    assert f[P_LEGALITY].sum() == 81
     assert (f[P_ONES] == 1.0).all()
 
 
@@ -41,12 +41,14 @@ def test_stone_planes_oriented_to_player():
     f = featurize(b)
     assert f[P_OPP_STONES, 4, 4] == 1.0
     assert f[P_OWN_STONES, 4, 4] == 0.0
-    # Black stone has 4 liberties → bucket index 3 (since cap is 4 → bucket 4-1=3).
+    # Black stone has 4 liberties → bucket index 3.
     assert f[P_OPP_LIBS + 3, 4, 4] == 1.0
     # Chain size = 1 → bucket 0.
     assert f[P_OPP_SIZE + 0, 4, 4] == 1.0
-    # Last move plane.
-    assert f[P_LAST_MOVE, 4, 4] == 1.0
+    # The point with a stone is not legal.
+    assert f[P_LEGALITY, 4, 4] == 0.0
+    # All other empty points remain legal (no superko violations yet).
+    assert f[P_LEGALITY].sum() == 80
 
 
 def test_liberty_buckets_capped():
@@ -76,13 +78,20 @@ def test_chain_size_bucket_after_merge():
         assert f[P_OPP_SIZE + 2, 4, c] == 1.0
 
 
-def test_last_move_zero_after_pass():
+def test_legality_plane_excludes_ko():
     b = Board(size=9)
-    b.play(b.point(4, 4))
-    b.play(PASS)
-    f = featurize(b)  # B to play (pass was W's).
-    # After a pass, last_move is None → the last-move plane is all zeros.
-    assert f[P_LAST_MOVE].sum() == 0
+    moves = [
+        (0, 1), (0, 2), (1, 0), (1, 1), (2, 1), (1, 3), PASS, (2, 2), (1, 2),
+    ]
+    for m in moves:
+        if isinstance(m, tuple):
+            b.play(b.point(*m))
+        else:
+            b.play(m)
+    # White is to play; the immediate ko-recapture point is forbidden.
+    f = featurize(b)
+    ko_r, ko_c = b.coord(b.point(1, 1))
+    assert f[P_LEGALITY, ko_r, ko_c] == 0.0
 
 
 def test_policy_target_indices():
