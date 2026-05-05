@@ -21,121 +21,16 @@ import csv
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
 
 from alphabetago.board import BLACK, WHITE
-from alphabetago.dataset import featurize_games
 from alphabetago.nn import PolicyOwnershipNet
 from alphabetago.selfplay import (
     play_match_game,
     play_search_games_serial,
     save_games,
 )
-
-
-def load_model(ckpt_path: Path, device: torch.device) -> PolicyOwnershipNet:
-    state = torch.load(ckpt_path, map_location=device, weights_only=False)
-    cfg = state["config"]
-    model = PolicyOwnershipNet(
-        board_size=cfg["board_size"],
-        in_planes=cfg["in_planes"],
-        channels=cfg["channels"],
-        n_blocks=cfg["n_blocks"],
-    ).to(device)
-    model.load_state_dict(state["model_state"])
-    return model
-
-
-def save_model(model: PolicyOwnershipNet, ckpt_path: Path) -> None:
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "config": {
-                "board_size": model.board_size,
-                "in_planes": model.in_planes,
-                "channels": model.channels,
-                "n_blocks": model.n_blocks,
-            },
-        },
-        ckpt_path,
-    )
-
-
-def fine_tune(
-    model: PolicyOwnershipNet,
-    games: list,
-    args: argparse.Namespace,
-    device: torch.device,
-    seed: int,
-) -> tuple[dict[str, float], dict[str, float]]:
-    feats, policies, ownerships = featurize_games(games, n_workers=args.workers)
-    n = feats.shape[0]
-    rng = np.random.default_rng(seed)
-    perm = rng.permutation(n)
-    feats = feats[perm]
-    policies = policies[perm]
-    ownerships = ownerships[perm]
-    n_val = max(1, int(n * 0.1))
-
-    feats_t = torch.from_numpy(feats)
-    pol_t = torch.from_numpy(policies)
-    own_t = torch.from_numpy(ownerships)
-    train_ds = TensorDataset(feats_t[n_val:], pol_t[n_val:], own_t[n_val:])
-    val_ds = TensorDataset(feats_t[:n_val], pol_t[:n_val], own_t[:n_val])
-    train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True, pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False, pin_memory=True
-    )
-
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=args.lr, weight_decay=1e-4
-    )
-
-    final_train: dict[str, float] = {}
-    final_val: dict[str, float] = {}
-    for _ in range(args.epochs):
-        for split, loader, is_train in (
-            ("train", train_loader, True),
-            ("val", val_loader, False),
-        ):
-            model.train(is_train)
-            tot_pol = tot_own = 0.0
-            tot_acc = 0
-            n_seen = 0
-            for f, p, o in loader:
-                f = f.to(device, non_blocking=True).float()
-                p = p.to(device, non_blocking=True).float()
-                o = o.to(device, non_blocking=True).float()
-                with torch.set_grad_enabled(is_train):
-                    pl, op = model(f)
-                    log_p = F.log_softmax(pl, dim=1)
-                    pol_loss = -(p * log_p).sum(dim=1).mean()
-                    own_loss = F.mse_loss(op, o)
-                    loss = pol_loss + own_loss
-                    if is_train:
-                        optimizer.zero_grad(set_to_none=True)
-                        loss.backward()
-                        optimizer.step()
-                bs = f.size(0)
-                tot_pol += pol_loss.item() * bs
-                tot_own += own_loss.item() * bs
-                tot_acc += int((pl.argmax(1) == p.argmax(1)).sum().item())
-                n_seen += bs
-            metrics = {
-                "policy_loss": tot_pol / n_seen,
-                "own_mse": tot_own / n_seen,
-                "top1": tot_acc / n_seen,
-            }
-            if split == "train":
-                final_train = metrics
-            else:
-                final_val = metrics
-    return final_train, final_val
+from alphabetago.training import fine_tune, load_model, save_model
 
 
 def run_match(
@@ -272,7 +167,14 @@ def main() -> None:
 
         new_model = load_model(prev_ckpt, device)
         t0 = time.time()
-        tr, va = fine_tune(new_model, games, args, device, seed=gen)
+        tr, va = fine_tune(
+            new_model, games, device,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            workers=args.workers,
+            seed=gen,
+        )
         train_t = time.time() - t0
         save_model(new_model, ckpt_path)
         print(
