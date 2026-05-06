@@ -313,11 +313,19 @@ def play_match_game(
     max_moves: int = 2000,
     temperature_moves: int = 20,
     temperature: float = 1.0,
+    skip_eyes: bool = True,
 ) -> GameRecord:
     """Play one game between two models. `model_black` plays Black,
     `model_white` plays White. Move selection mirrors `play_search_game`
-    (eye-avoidance, sample-from-visits with temperature in the opening,
-    greedy on the alpha-beta best move afterwards).
+    (sample-from-visits with temperature in the opening, greedy on the
+    alpha-beta best move afterwards).
+
+    If `skip_eyes` is True (default), own-eye moves are filtered out at
+    selection time — this is the heuristic that keeps games terminating
+    when the value head hasn't yet learned that eye-fills are bad. With
+    `skip_eyes=False`, the agent uses the raw alpha-beta best move and
+    raw visit distribution; useful for diagnosing whether the network
+    has internalized the eye-fill-is-bad signal on its own.
     """
     import numpy as np
 
@@ -336,19 +344,23 @@ def play_match_game(
     while not board.is_game_over and len(moves) < max_moves:
         side = board.to_play
         model = model_black if side == BLACK else model_white
-        root, _, _ = search(
+        root, ab_best, _ = search(
             board, model, device,
             n_iterations=n_iterations,
             leaves_per_batch=leaves_per_batch,
         )
-        target_move, _ = best_non_eye_move(root, side)
-        if target_move is None:
-            target_move = PASS
+        if skip_eyes:
+            target_move, _ = best_non_eye_move(root, side)
+            if target_move is None:
+                target_move = PASS
+        else:
+            target_move = ab_best if ab_best is not None else PASS
 
         if len(moves) < temperature_moves:
             visits = search_visit_policy(root)
             if visits:
-                visits = filter_visits_no_eyes(visits, board, side)
+                if skip_eyes:
+                    visits = filter_visits_no_eyes(visits, board, side)
                 played = sample_from_visit_policy(visits, temperature, rng)
             else:
                 played = PASS
@@ -460,7 +472,7 @@ def _match_worker(packed):
 
     (
         ckpt_a, ckpt_b, n_local, size, n_iters, batch,
-        seed_offset, max_moves, temp_moves, temp, a_is_black_first,
+        seed_offset, max_moves, temp_moves, temp, a_is_black_first, skip_eyes,
     ) = packed
     device = _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
     model_a = _load_model(Path(ckpt_a), device)
@@ -468,6 +480,7 @@ def _match_worker(packed):
 
     a_b = a_w = b_b = b_w = jigos = 0
     a_score_total = 0.0
+    move_total = 0
     for i in range(n_local):
         a_is_black = a_is_black_first if i % 2 == 0 else not a_is_black_first
         if a_is_black:
@@ -485,7 +498,9 @@ def _match_worker(packed):
             max_moves=max_moves,
             temperature_moves=temp_moves,
             temperature=temp,
+            skip_eyes=skip_eyes,
         )
+        move_total += rec.n_moves
         a_score_total += rec.final_score if a_is_black else -rec.final_score
         if rec.winner == BLACK:
             if a_is_black:
@@ -499,7 +514,7 @@ def _match_worker(packed):
                 a_w += 1
         else:
             jigos += 1
-    return (a_b, a_w, b_b, b_w, jigos, a_score_total, n_local)
+    return (a_b, a_w, b_b, b_w, jigos, a_score_total, n_local, move_total)
 
 
 def play_match_games_multiproc(
@@ -514,11 +529,13 @@ def play_match_games_multiproc(
     max_moves: int = 2000,
     temperature_moves: int = 20,
     temperature: float = 1.0,
+    skip_eyes: bool = True,
 ) -> dict[str, float]:
     """Run an `n_games`-game match between checkpoints `ckpt_a` and `ckpt_b`
     across `n_workers` processes. Sides alternate within each worker so the
     first-move advantage is split. Returns the same dict shape as the
-    in-process match runner: a_wins, b_wins, jigos, a_score_avg.
+    in-process match runner: a_wins, b_wins, jigos, a_score_avg, plus
+    avg_moves (mean game length across all matches).
     """
     n_workers = max(1, min(n_workers, n_games))
     per = n_games // n_workers
@@ -547,6 +564,7 @@ def play_match_games_multiproc(
             temperature_moves,
             temperature,
             a_is_black_first,
+            skip_eyes,
         ))
         seed += n_local
         games_done += n_local
@@ -559,7 +577,8 @@ def play_match_games_multiproc(
     a_b = a_w = b_b = b_w = jigos = 0
     a_score_total = 0.0
     n_total = 0
-    for (a_b_, a_w_, b_b_, b_w_, jigos_, score_, n_) in results:
+    move_total = 0
+    for (a_b_, a_w_, b_b_, b_w_, jigos_, score_, n_, moves_) in results:
         a_b += a_b_
         a_w += a_w_
         b_b += b_b_
@@ -567,11 +586,13 @@ def play_match_games_multiproc(
         jigos += jigos_
         a_score_total += score_
         n_total += n_
+        move_total += moves_
     return {
         "a_wins": a_b + a_w,
         "b_wins": b_b + b_w,
         "jigos": jigos,
         "a_score_avg": a_score_total / max(1, n_total),
+        "avg_moves": move_total / max(1, n_total),
     }
 
 

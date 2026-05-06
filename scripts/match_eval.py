@@ -47,6 +47,10 @@ def main() -> None:
     parser.add_argument("--temperature-moves", type=int, default=20)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--no-eye-avoidance", action="store_true",
+        help="Disable own-eye filtering during move selection."
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -71,6 +75,7 @@ def main() -> None:
             base_seed=args.seed,
             temperature_moves=args.temperature_moves,
             temperature=args.temperature,
+            skip_eyes=not args.no_eye_avoidance,
         )
         dt = time.time() - t0
         a_total = match["a_wins"]
@@ -94,6 +99,7 @@ def main() -> None:
                 f"[95% CI {lo * 100:.1f}–{hi * 100:.1f}%]"
             )
         print(f"  Mean score (A perspective): {match['a_score_avg']:+.2f}")
+        print(f"  Mean moves/game: {match['avg_moves']:.1f}")
         return
 
     model_a = load_model(args.a, device)
