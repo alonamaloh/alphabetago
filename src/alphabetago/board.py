@@ -301,6 +301,43 @@ class Board:
         self._to_play = opp
         self._history.add(self._hash)
 
+    def setup(self, color: int, point: int) -> None:
+        """Place a setup stone without changing whose turn it is.
+
+        Used for SGF AB[]/AW[] handling. Mutates chains, liberties, the
+        Zobrist hash, and the position-history set, but does NOT advance
+        the move counter or flip `to_play`. Captures any opponent chains
+        that get reduced to zero liberties (would never happen for a
+        normal handicap setup but the logic is identical).
+        """
+        if color not in (BLACK, WHITE):
+            raise ValueError(f"setup color must be BLACK or WHITE, got {color}")
+        if self._cells[point] != EMPTY:
+            raise IllegalMoveError(f"setup at occupied point {point}")
+        opp = opponent(color)
+        z_me = self._zobrist_for(color)
+        z_opp = self._zobrist_for(opp)
+        for n in self._neighbors(point):
+            v = self._cells[n]
+            if v == opp:
+                root = self._find(n)
+                self._chain_liberties[root].discard(point)
+                if not self._chain_liberties[root]:
+                    self._capture_chain(n, z_opp)
+            elif v == color:
+                self._chain_liberties[self._find(n)].discard(point)
+        self._cells[point] = color
+        self._parent[point] = point
+        self._chain_stones[point] = 1
+        self._chain_liberties[point] = {
+            m for m in self._neighbors(point) if self._cells[m] == EMPTY
+        }
+        self._hash ^= z_me[point]
+        for n in self._neighbors(point):
+            if self._cells[n] == color:
+                self._union(point, n)
+        self._history.add(self._hash)
+
     def _capture_chain(self, seed: int, zobrist_table: list[int]) -> int:
         root = self._find(seed)
         stones = self._stones_in_chain(seed)
